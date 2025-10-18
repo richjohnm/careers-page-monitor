@@ -35,30 +35,64 @@ jobs:
       - name: Syntax check
         run: python -m py_compile scraper/main.py
 
-      # Run the scraper, capture stdout (for count parsing)
+      # Run the scraper and capture output. Detect count from new_jobs.json.
       - name: Run scraper and capture output
         id: scrape
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
           python -m scraper.main | tee scraper_out.txt
 
-          # Extract "Found N new jobs"
-          COUNT=$(grep -Eo 'Found[[:space:]][0-9]+[[:space:]]+new job' scraper_out.txt \
-                  | grep -Eo '[0-9]+' | tail -n1 || echo 0)
-          COUNT=${COUNT:-0}
-          echo "Scraper found $COUNT new jobs"
-          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
-
-          if [ "$COUNT" -gt 0 ]; then
+          if [ -f new_jobs.json ]; then
+            COUNT=$(python - <<'PY'
+import json
+with open("new_jobs.json","r",encoding="utf-8") as f:
+    print(len(json.load(f)))
+PY
+)
+            echo "Detected $COUNT new jobs from new_jobs.json"
             echo "has_new=true"  >> "$GITHUB_OUTPUT"
+            echo "count=$COUNT"  >> "$GITHUB_OUTPUT"
           else
+            echo "No new_jobs.json found; assuming 0 new jobs"
             echo "has_new=false" >> "$GITHUB_OUTPUT"
+            echo "count=0"       >> "$GITHUB_OUTPUT"
           fi
 
-      # If there are new jobs, upload the files your scraper created
+      # Always print a debug summary so we can see what's going on
+      - name: Debug workspace (list files and preview job data)
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          echo "PWD=$(pwd)"
+          echo "Python:"; python -V
+          echo
+          echo "Top-level files:"; ls -la
+          echo
+          echo "scraper_out.txt (last 50 lines):"
+          tail -n 50 scraper_out.txt || true
+          echo
+          echo "Check for new_jobs files:"
+          ls -la new_jobs* || true
+          echo
+          echo "new_jobs.json preview:"
+          python - <<'PY'
+import json, os
+p = "new_jobs.json"
+print("exists:", os.path.exists(p))
+if os.path.exists(p):
+    try:
+        data = json.load(open(p, "r", encoding="utf-8"))
+        print("count:", len(data))
+        for j in data[:5]:
+            print({k: j.get(k) for k in ("title","company","url")})
+    except Exception as e:
+        print("Error reading JSON:", e)
+PY
+
+      # Upload the full job files as artifacts only when new jobs exist
       - name: Upload job list artifacts
-        if: steps.scrape.outputs.has_new == 'true'
+        if: ${{ hashFiles('new_jobs.json') != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: new-jobs-${{ github.run_id }}
@@ -67,67 +101,3 @@ jobs:
             new_jobs.csv
             new_jobs.md
           retention-days: 7
-
-      # Build a Markdown “top 10” list for Teams from new_jobs.json
-      - name: Build Teams message (top 10)
-        if: steps.scrape.outputs.has_new == 'true'
-        id: build_msg
-        shell: bash
-        run: |
-          LIST_MD=$(python - <<'PY'
-import json
-with open("new_jobs.json","r",encoding="utf-8") as f:
-    data = json.load(f)
-items = []
-for j in data[:10]:
-    title = (j.get("title") or "(No title)").replace("\n"," ").strip()
-    url = (j.get("url") or "#").strip()
-    company = (j.get("company") or "").strip()
-    bullet = f"- {title}"
-    if company:
-        bullet += f" — {company}"
-    items.append(bullet)
-print("\n".join(items))
-PY
-)
-          {
-            echo "list_md<<EOF"
-            echo "$LIST_MD"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-
-      # Teams message when there are NO new jobs
-      - name: Notify Teams (no new jobs)
-        if: steps.scrape.outputs.has_new == 'false'
-        env:
-          FLOW_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
-        run: |
-          MSG="ℹ️ No new jobs found."
-          curl -sS -X POST "$FLOW_URL" \
-            -H "Content-Type: application/json" \
-            -d "{\"message\":\"$MSG\"}"
-
-      # Teams message when there ARE new jobs (summary + top 10 + link)
-      - name: Notify Teams (summary + top 10)
-        if: steps.scrape.outputs.has_new == 'true'
-        env:
-          FLOW_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
-          COUNT: ${{ steps.scrape.outputs.count }}
-          LIST_MD: ${{ steps.build_msg.outputs.list_md }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        shell: bash
-        run: |
-          MSG="✅ ${COUNT} new job(s) found:
-${LIST_MD}
-
-📂 Full list: Download from run → Artifacts
-View run: ${RUN_URL}"
-          # JSON-encode safely via Python to handle quotes/newlines
-          PAYLOAD=$(python - <<'PY'
-import json, os
-print(json.dumps({"message": os.environ["MSG"]}, ensure_ascii=False))
-PY
-)
-          curl -sS -X POST "$FLOW_URL" \
-            -H "Content-Type: application/json" \
-            -d "$PAYLOAD"
