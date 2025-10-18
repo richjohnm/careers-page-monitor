@@ -128,6 +128,7 @@ def main():
     commit_state = str(state_cfg.get("commit_state_changes", True)).lower() == "true"
 
     targets = load_targets("scraper/urls.csv")
+    print(f"✅ Loaded {len(targets)} targets from urls.csv")  # Debug line added
 
     headers = {"User-Agent": user_agent}
     session = requests.Session()
@@ -203,4 +204,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
