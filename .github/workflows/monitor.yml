@@ -6,7 +6,7 @@ on:
     - cron: '17 * * * *'  # hourly at :17 UTC
 
 permissions:
-  contents: write   # <-- allow push if your scraper commits state
+  contents: write   # allow push if your scraper commits state
 
 jobs:
   run:
@@ -18,7 +18,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          persist-credentials: true   # <-- keeps GITHUB_TOKEN for push
+          persist-credentials: true   # keeps GITHUB_TOKEN for push
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -35,20 +35,18 @@ jobs:
       - name: Syntax check
         run: python -m py_compile scraper/main.py
 
-      # Run the scraper, capture its output, and detect "Found N new jobs."
+      # Run the scraper, capture stdout (for count parsing)
       - name: Run scraper and capture output
         id: scrape
         shell: bash
         run: |
           set -e
-          # Run your scraper and capture stdout so we can parse it
           python -m scraper.main | tee scraper_out.txt
 
-          # Extract the number from a line like: "Found 0 new jobs." or "Found 3 new jobs"
+          # Extract "Found N new jobs"
           COUNT=$(grep -Eo 'Found[[:space:]][0-9]+[[:space:]]+new job' scraper_out.txt \
                   | grep -Eo '[0-9]+' | tail -n1 || echo 0)
           COUNT=${COUNT:-0}
-
           echo "Scraper found $COUNT new jobs"
           echo "count=$COUNT" >> "$GITHUB_OUTPUT"
 
@@ -58,25 +56,78 @@ jobs:
             echo "has_new=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # Notify when there are NO new jobs
+      # If there are new jobs, upload the files your scraper created
+      - name: Upload job list artifacts
+        if: steps.scrape.outputs.has_new == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: new-jobs-${{ github.run_id }}
+          path: |
+            new_jobs.json
+            new_jobs.csv
+            new_jobs.md
+          retention-days: 7
+
+      # Build a Markdown “top 10” list for Teams from new_jobs.json
+      - name: Build Teams message (top 10)
+        if: steps.scrape.outputs.has_new == 'true'
+        id: build_msg
+        shell: bash
+        run: |
+          LIST_MD=$(python - <<'PY'
+import json
+with open("new_jobs.json","r",encoding="utf-8") as f:
+    data = json.load(f)
+items = []
+for j in data[:10]:
+    title = (j.get("title") or "(No title)").replace("\n"," ").strip()
+    url = (j.get("url") or "#").strip()
+    company = (j.get("company") or "").strip()
+    bullet = f"- {title}"
+    if company:
+        bullet += f" — {company}"
+    items.append(bullet)
+print("\n".join(items))
+PY
+)
+          {
+            echo "list_md<<EOF"
+            echo "$LIST_MD"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # Teams message when there are NO new jobs
       - name: Notify Teams (no new jobs)
         if: steps.scrape.outputs.has_new == 'false'
         env:
-          FLOW_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}   # <-- this is your Power Automate URL
+          FLOW_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
         run: |
           MSG="ℹ️ No new jobs found."
           curl -sS -X POST "$FLOW_URL" \
             -H "Content-Type: application/json" \
             -d "{\"message\":\"$MSG\"}"
 
-      # Notify when there ARE new jobs
-      - name: Notify Teams (new jobs)
+      # Teams message when there ARE new jobs (summary + top 10 + link)
+      - name: Notify Teams (summary + top 10)
         if: steps.scrape.outputs.has_new == 'true'
         env:
           FLOW_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
           COUNT: ${{ steps.scrape.outputs.count }}
+          LIST_MD: ${{ steps.build_msg.outputs.list_md }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
         run: |
-          MSG="✅ ${COUNT} new job(s) found by Careers Monitor."
+          MSG="✅ ${COUNT} new job(s) found:
+${LIST_MD}
+
+📂 Full list: Download from run → Artifacts
+View run: ${RUN_URL}"
+          # JSON-encode safely via Python to handle quotes/newlines
+          PAYLOAD=$(python - <<'PY'
+import json, os
+print(json.dumps({"message": os.environ["MSG"]}, ensure_ascii=False))
+PY
+)
           curl -sS -X POST "$FLOW_URL" \
             -H "Content-Type: application/json" \
-            -d "{\"message\":\"$MSG\"}"
+            -d "$PAYLOAD"
