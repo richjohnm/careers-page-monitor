@@ -13,7 +13,7 @@ filtering:
   match_in: [title]
 
 notifications:
-  enable_teams: true
+  enable_teams: false
   enable_email: false
 
 state:
