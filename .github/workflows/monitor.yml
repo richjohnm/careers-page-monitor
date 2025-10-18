@@ -6,7 +6,7 @@ on:
     - cron: '17 * * * *'  # hourly at :17 UTC
 
 permissions:
-  contents: write   # <-- allow push
+  contents: write   # <-- allow push if your scraper commits state
 
 jobs:
   run:
@@ -35,24 +35,48 @@ jobs:
       - name: Syntax check
         run: python -m py_compile scraper/main.py
 
-      - name: Send Teams ping (diagnostic)
-        env:
-          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+      # Run the scraper, capture its output, and detect "Found N new jobs."
+      - name: Run scraper and capture output
+        id: scrape
+        shell: bash
         run: |
-          payload=$(cat <<'JSON'
-          {
-            "@type": "MessageCard",
-            "@context": "https://schema.org/extensions",
-            "summary": "Ping",
-            "themeColor": "0076D7",
-            "title": "GitHub Actions Ping",
-            "text": "✅ Careers Monitor workflow can reach Teams."
-          }
-          JSON
-          )
-          curl -sS -X POST -H "Content-Type: application/json" -d "$payload" "$TEAMS_WEBHOOK_URL" -o /dev/null -w "Teams HTTP status: %{http_code}\n"
+          set -e
+          # Run your scraper and capture stdout so we can parse it
+          python -m scraper.main | tee scraper_out.txt
 
-      - name: Run scraper
+          # Extract the number from a line like: "Found 0 new jobs." or "Found 3 new jobs"
+          COUNT=$(grep -Eo 'Found[[:space:]][0-9]+[[:space:]]+new job' scraper_out.txt \
+                  | grep -Eo '[0-9]+' | tail -n1 || echo 0)
+          COUNT=${COUNT:-0}
+
+          echo "Scraper found $COUNT new jobs"
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+
+          if [ "$COUNT" -gt 0 ]; then
+            echo "has_new=true"  >> "$GITHUB_OUTPUT"
+          else
+            echo "has_new=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Notify when there are NO new jobs
+      - name: Notify Teams (no new jobs)
+        if: steps.scrape.outputs.has_new == 'false'
         env:
-          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
-        run: python -m scraper.main
+          FLOW_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}   # <-- this is your Power Automate URL
+        run: |
+          MSG="ℹ️ No new jobs found."
+          curl -sS -X POST "$FLOW_URL" \
+            -H "Content-Type: application/json" \
+            -d "{\"message\":\"$MSG\"}"
+
+      # Notify when there ARE new jobs
+      - name: Notify Teams (new jobs)
+        if: steps.scrape.outputs.has_new == 'true'
+        env:
+          FLOW_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+          COUNT: ${{ steps.scrape.outputs.count }}
+        run: |
+          MSG="✅ ${COUNT} new job(s) found by Careers Monitor."
+          curl -sS -X POST "$FLOW_URL" \
+            -H "Content-Type: application/json" \
+            -d "{\"message\":\"$MSG\"}"
