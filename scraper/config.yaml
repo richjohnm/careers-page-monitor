@@ -1,0 +1,24 @@
+
+request:
+  user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+  timeout_seconds: 20
+  max_retries: 2
+  sleep_between_requests_ms: 300
+
+crawl:
+  max_workers: 10
+  per_host_delay_ms: 200
+
+filtering:
+  match_in: [title]
+
+notifications:
+  enable_teams: true
+  enable_email: false
+
+state:
+  db_path: scraper/db.sqlite3
+  commit_state_changes: true
+
+paging:
+  max_pages_per_site: 10
