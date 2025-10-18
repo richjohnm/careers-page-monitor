@@ -1,6 +1,8 @@
 import csv
 import hashlib
 import os
+import json
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -108,6 +110,54 @@ def get_jobs_for_target(session: requests.Session, tgt: Target, cfg: dict) -> Li
     return out
 
 
+# === Step 1 helpers: write job files (JSON / CSV / MD) ===
+def _clean_text(s: str) -> str:
+    """Normalize whitespace and strip Nones for safe output."""
+    return re.sub(r"\s+", " ", str(s or "")).strip()
+
+
+def write_new_job_files(items: List[Dict]) -> None:
+    """
+    Creates three files in the current working directory:
+      - new_jobs.json : full structured list of {title, company, url}
+      - new_jobs.csv  : header + rows (JOB_TITLE, COMPANY, URL)
+      - new_jobs.md   : bullet list with clickable Title — Company
+    Only the three fields requested are included.
+    """
+    # Keep only the three required fields and clean text
+    cleaned = [
+        {
+            "title": _clean_text(i.get("title")),
+            "company": _clean_text(i.get("company")),
+            "url": _clean_text(i.get("url")),
+        }
+        for i in items
+    ]
+
+    # JSON (structured, pretty)
+    with open("new_jobs.json", "w", encoding="utf-8") as f:
+        json.dump(cleaned, f, ensure_ascii=False, indent=2)
+
+    # CSV (Excel-friendly)
+    with open("new_jobs.csv", "w", encoding="utf-8", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["JOB_TITLE", "COMPANY", "URL"])
+        for j in cleaned:
+            w.writerow([j["title"], j["company"], j["url"]])
+
+    # Markdown (clickable titles)
+    with open("new_jobs.md", "w", encoding="utf-8") as f:
+        for j in cleaned:
+            title = j["title"] or "(No title)"
+            url = j["url"] or "#"
+            company = j["company"]
+            bullet = f"- [{title}]({url       if company:
+                bullet += f" — {company}"
+            f.write(bullet + "\n")
+
+    print(f"Wrote {len(cleaned)} new jobs to new_jobs.json, new_jobs.csv, and new_jobs.md")
+
+
 def main():
     cfg = load_config("scraper/config.yaml")
 
@@ -158,6 +208,11 @@ def main():
                 print("Error during fetch:", e)
 
     print(f"Found {len(new_items)} new jobs.")
+
+    # === Step 1: Persist new jobs to files (for later Teams/artifacts use)
+    if new_items:
+        write_new_job_files(new_items)
+    # (If there are zero new jobs, nothing is written.)
 
     # ---- Teams only ----
     enable_teams = str(notif_cfg.get("enable_teams", True)).lower() == "true"
