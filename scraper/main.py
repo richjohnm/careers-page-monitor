@@ -128,7 +128,7 @@ def main():
         if str(cfg['notifications'].get('enable_email', False)).lower() == 'true':
             required = ['SMTP_SERVER','SMTP_PORT','SMTP_USERNAME','SMTP_PASSWORD','SMTP_FROM','SMTP_TO']
             if all(os.getenv(k) for k in required):
-                body_lines = [f"{it.get('title')}
+                body_lines = [f"{it.get('title', 'Untitled')}\n{it.get('location', '')}" for it in items]
 {it.get('company','')}
 {it.get('url')}
 " for it in new_items]
